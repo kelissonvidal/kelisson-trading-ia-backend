@@ -5,16 +5,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-# --- Config ---
+# Neutraliza proxies que podem quebrar o httpx com o SDK da OpenAI
+for k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy"):
+    os.environ.pop(k, None)
+
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("Defina OPENAI_API_KEY nas variáveis de ambiente.")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# CORS (em produção, troque "*" pelos seus domínios separados por vírgula)
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
-
-# Cooldown por conta (anti-flood simples em memória)
 LAST_HIT: Dict[str, float] = {}
 COOLDOWN_SECONDS = float(os.environ.get("COOLDOWN_SECONDS", "10"))
 
@@ -27,7 +27,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Schemas ---
 class Candle(BaseModel):
     time: int
     open: float
@@ -36,23 +35,13 @@ class Candle(BaseModel):
     close: float
     volume: float
 
-class Plan(BaseModel):
-    E1: float
-    E2: Optional[float] = None
-    E3: Optional[float] = None
-    stop: float
-    TP1: float
-    TP2: float
-    TP3: float
-    last: float
-
 class Payload(BaseModel):
     symbol: str = Field(..., examples=["ETHUSDT"])
     tf: str = Field(..., examples=["4h"])
     candles: List[Candle]
-    baseline: Dict[str, Any]     # {"plan": Plan, ...}
-    context: Dict[str, Any]      # {"wallet":..,"fx":..,"allocPct":..,"split":[..],"riskPct":..}
-    account_id: Optional[str] = None  # para rate-limit por conta (pego do front)
+    baseline: Dict[str, Any]
+    context: Dict[str, Any]
+    account_id: Optional[str] = None
 
 class Suggestion(BaseModel):
     E1: float
@@ -70,7 +59,6 @@ class Response(BaseModel):
     source: str
     suggestion: Suggestion
 
-# --- Prompt base (conciso e objetivo) ---
 SYSTEM_PROMPT = """Você é um assistente de trading quantitativo.
 Receberá um resumo de mercado (último preço, range simples), um plano baseline (E1,E2,E3,STOP,TP1-TP3,last),
 e parâmetros de risco do usuário (allocPct, riskPct, split).
@@ -93,9 +81,12 @@ def guard_flo(x, default):
     except Exception:
         return float(default)
 
+@app.get("/")
+def root():
+    return {"ok": True, "service": "kelisson-trading-ia-backend", "docs": "/docs"}
+
 @app.post("/analyze", response_model=Response)
 def analyze(p: Payload):
-    # --- cooldown simples por account_id (ou por símbolo se não houver) ---
     key = p.account_id or f"{p.symbol}:{p.tf}"
     now = time.time()
     last = LAST_HIT.get(key, 0.0)
@@ -109,30 +100,18 @@ def analyze(p: Payload):
     last_px = closes[-1]
     range_px = (max(closes) - min(closes)) if len(closes) > 2 else 0.0
 
-    # Enxugamos o payload para reduzir tokens
     usr = {
-        "symbol": p.symbol,
-        "tf": p.tf,
-        "last": last_px,
-        "range": range_px,
-        "baseline": p.baseline.get("plan", {}),
-        "context": {
-            "allocPct": p.context.get("allocPct"),
-            "riskPct": p.context.get("riskPct"),
-            "split": p.context.get("split"),
-            # ATR opcional (se quiser enviar do front): "atr14": p.context.get("atr14")
-        }
+      "symbol": p.symbol, "tf": p.tf, "last": last_px, "range": range_px,
+      "baseline": p.baseline.get("plan", {}),
+      "context": { "allocPct": p.context.get("allocPct"), "riskPct": p.context.get("riskPct"), "split": p.context.get("split") }
     }
 
-    # OpenAI call
     r = client.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0.2,
         response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(usr)}
-        ],
+        messages=[ {"role":"system","content":SYSTEM_PROMPT},
+                   {"role":"user","content":json.dumps(usr)} ],
     )
 
     raw = r.choices[0].message.content or "{}"
@@ -148,17 +127,11 @@ def analyze(p: Payload):
         return guard_flo(s.get(k, base.get(k, last_px)), base.get(k, last_px))
 
     suggestion = {
-        "E1": g("E1"),
-        "E2": g("E2"),
-        "E3": g("E3"),
-        "stop": g("stop"),
-        "TP1": g("TP1"),
-        "TP2": g("TP2"),
-        "TP3": g("TP3"),
+        "E1": g("E1"), "E2": g("E2"), "E3": g("E3"),
+        "stop": g("stop"), "TP1": g("TP1"), "TP2": g("TP2"), "TP3": g("TP3"),
         "confidence": int(max(0, min(100, int(s.get("confidence", 75))))),
         "rationale": str(s.get("rationale", "Ajustes mínimos em torno do baseline."))
     }
 
-    # marca hit do cooldown
     LAST_HIT[key] = now
     return {"ok": True, "source": "gpt-4o-mini", "suggestion": suggestion}
