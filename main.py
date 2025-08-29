@@ -19,6 +19,8 @@ LAST_HIT: Dict[str, float] = {}
 COOLDOWN_SECONDS = float(os.environ.get("COOLDOWN_SECONDS", "10"))
 
 app = FastAPI()
+from notify import router as notify_router
+app.include_router(notify_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
