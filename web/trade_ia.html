@@ -1,1 +1,137 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Plano de Trade — teste de backend</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0f1420; color:#e6e9f0; margin:0; }
+    .wrap { max-width: 880px; margin: 32px auto; padding: 0 16px; }
+    .card { background:#121a2a; border:1px solid #1f2a44; border-radius:16px; padding:18px; box-shadow: 0 6px 18px rgba(0,0,0,.25); }
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    small { opacity:.7 }
+    label { display:block; font-size:14px; margin: 12px 0 6px; opacity:.9 }
+    input, select, button { font: inherit; }
+    input, select { width:100%; padding:12px 14px; border-radius:10px; border:1px solid #2a3b60; background:#0e1627; color:#e6e9f0; }
+    .row { display:grid; gap:12px; grid-template-columns: 1fr 120px; }
+    .btn { cursor:pointer; border:0; padding:12px 16px; border-radius:10px; background:#2463eb; color:#fff; font-weight:600 }
+    .btn:disabled { opacity:.5; cursor:not-allowed }
+    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#0b1222; border:1px solid #213055; font-size:12px; margin-right:6px; opacity:.9 }
+    pre { white-space:pre-wrap; word-break:break-word; background:#0b1222; border:1px solid #1f2a44; padding:12px; border-radius:12px; }
+    .ok { color:#46d369 } .err { color:#ff6961 }
+    .mt16{margin-top:16px}.mt24{margin-top:24px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Plano de Trade — v0.9.6-ia (modo seguro)</h1>
+      <small>Sem TradingView e sem push. Esta página serve para <b>validar o backend</b>.</small>
+
+      <!-- 1) Configure sua URL de backend AQUI -->
+      <div class="mt16">
+        <label for="backend">BACKEND_URL</label>
+        <input id="backend" value="https://kelisson-trading-ia-backend.onrender.com" />
+        <small>Troque acima pelo endereço do Render (ex.: <i>https://kelisson-trading-ia-backend.onrender.com</i>).</small>
+      </div>
+
+      <!-- 2) Ping simples ao / para testar -->
+      <div class="row mt16">
+        <div>
+          <label for="symbol">Símbolo</label>
+          <input id="symbol" value="ETHUSDT" />
+        </div>
+        <div>
+          <label for="tf">Timeframe</label>
+          <select id="tf">
+            <option value="4h" selected>4h</option>
+            <option value="1h">1h</option>
+            <option value="D">D</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="mt16">
+        <button class="btn" id="btnPing">Testar conexão (/)</button>
+        <button class="btn" id="btnAnalyze" style="margin-left:8px;background:#2ea043">Gerar plano (modo seguro)</button>
+      </div>
+
+      <div class="mt16">
+        <span class="pill" id="auth">auth —</span>
+        <span class="pill" id="ping">ping —</span>
+        <span class="pill" id="analyze">analyze —</span>
+      </div>
+
+      <div class="mt24">
+        <label>Saída</label>
+        <pre id="out">Pronto para testar.</pre>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const pill = (el, text, ok) => {
+      el.textContent = text;
+      el.className = 'pill ' + (ok ? 'ok' : 'err');
+    };
+
+    const pingPill = $('ping');
+    const authPill = $('auth');
+    const analyzePill = $('analyze');
+    const out = $('out');
+
+    async function ping() {
+      const base = $('backend').value.trim();
+      out.textContent = '🔎 Testando ' + base + '/ ...';
+      try {
+        const r = await fetch(base + '/', { method: 'GET' });
+        const txt = await r.text();
+        pill(pingPill, 'ping ' + r.status, r.ok);
+        out.textContent = txt.slice(0, 2000);
+      } catch (e) {
+        pill(pingPill, 'ping erro', false);
+        out.textContent = 'Falha no ping: ' + e.message;
+      }
+    }
+
+    // "Gerar plano (modo seguro)" = payload mínimo só para ver se a API responde
+    async function analyze() {
+      const base = $('backend').value.trim();
+      const symbol = $('symbol').value.trim() || 'ETHUSDT';
+      const tf = $('tf').value;
+      const payload = {
+        symbol,
+        tf,
+        // NOTA: sem candles/baseline para não travar — servidor deve retornar msg clara.
+        baseline: {},
+        context: {},
+        account_id: 'kelisson'
+      };
+
+      out.textContent = '📡 POST ' + base + '/analyze ...';
+      try {
+        const r = await fetch(base + '/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const txt = await r.text();
+        pill(analyzePill, 'analyze ' + r.status, r.ok);
+        out.textContent = txt.slice(0, 4000);
+      } catch (e) {
+        pill(analyzePill, 'analyze erro', false);
+        out.textContent = 'Falha no analyze: ' + e.message;
+      }
+    }
+
+    // placeholder de “auth ok”
+    pill(authPill, 'auth ok', true);
+
+    $('btnPing').addEventListener('click', ping);
+    $('btnAnalyze').addEventListener('click', analyze);
+  </script>
+</body>
+</html>
 
