@@ -1,26 +1,20 @@
-import os, json, time
-from typing import List, Optional, Dict, Any
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from openai import OpenAI
+from typing import Dict
+from .schemas import AnalyzeIn, AnalyzeOut, Suggestion
+from .services import (
+    fetch_binance_klines, TF_TO_BINANCE,
+    compute_baseline, build_rules_fallback, rr_from
+)
+from .llm import try_llm_suggestion
 
-# Neutraliza proxies que podem quebrar o httpx com o SDK da OpenAI
-for k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy"):
-    os.environ.pop(k, None)
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS","").split(",") if o.strip()]
+if not ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS = ["*"]  # você pode apertar isso em produção
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("Defina OPENAI_API_KEY nas variáveis de ambiente.")
-client = OpenAI(api_key=OPENAI_API_KEY)
+app = FastAPI(title="kelisson-trading-ia-backend")
 
-ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
-LAST_HIT: Dict[str, float] = {}
-COOLDOWN_SECONDS = float(os.environ.get("COOLDOWN_SECONDS", "10"))
-
-app = FastAPI()
-from notify import router as notify_router
-app.include_router(notify_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -29,111 +23,54 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class Candle(BaseModel):
-    time: int
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-
-class Payload(BaseModel):
-    symbol: str = Field(..., examples=["ETHUSDT"])
-    tf: str = Field(..., examples=["4h"])
-    candles: List[Candle]
-    baseline: Dict[str, Any]
-    context: Dict[str, Any]
-    account_id: Optional[str] = None
-
-class Suggestion(BaseModel):
-    E1: float
-    E2: Optional[float] = None
-    E3: Optional[float] = None
-    stop: float
-    TP1: float
-    TP2: float
-    TP3: float
-    confidence: int
-    rationale: str
-
-class Response(BaseModel):
-    ok: bool
-    source: str
-    suggestion: Suggestion
-
-SYSTEM_PROMPT = """Você é um assistente de trading quantitativo.
-Receberá um resumo de mercado (último preço, range simples), um plano baseline (E1,E2,E3,STOP,TP1-TP3,last),
-e parâmetros de risco do usuário (allocPct, riskPct, split).
-Tarefa: retornar ajustes NUMÉRICOS (json) para E1,E2,E3, STOP, TP1,TP2,TP3; um "confidence" 0–100; e um "rationale" curto.
-Regras:
-- Coerência: STOP < E3 ≤ E2 ≤ E1 < TP1 < TP2 < TP3.
-- Não afaste os níveis mais de ±3% do baseline sem justificativa explícita no "rationale".
-- Penalize STOP muito apertado quando a volatilidade recente estiver alta (o cliente pode embutir ATR).
-- Evite números mágicos: ajuste em função do baseline/last.
-- Seja sucinto no "rationale".
-Responda APENAS json no formato:
-{
-  "suggestion": { "E1":..., "E2":..., "E3":..., "stop":..., "TP1":..., "TP2":..., "TP3":..., "confidence":..., "rationale":"..." }
-}
-"""
-
-def guard_flo(x, default):
-    try:
-        return float(x)
-    except Exception:
-        return float(default)
-
 @app.get("/")
-def root():
-    return {"ok": True, "service": "kelisson-trading-ia-backend", "docs": "/docs"}
+def health():
+    return {"ok": True, "service": "kelisson-trading-ia-backend"}
 
-@app.post("/analyze", response_model=Response)
-def analyze(p: Payload):
-    key = p.account_id or f"{p.symbol}:{p.tf}"
-    now = time.time()
-    last = LAST_HIT.get(key, 0.0)
-    if now - last < COOLDOWN_SECONDS:
-        raise HTTPException(429, f"cooldown: aguarde {COOLDOWN_SECONDS - (now-last):.1f}s")
+@app.post("/analyze", response_model=AnalyzeOut)
+async def analyze(payload: AnalyzeIn):
+    # 1) Candles
+    candles = payload.candles
+    if not candles or len(candles) < 50:
+        interval = TF_TO_BINANCE.get(payload.tf, "4h")
+        try:
+            candles = await fetch_binance_klines(payload.symbol, interval, 400)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Binance error: {e}")
 
-    if not p.candles or "plan" not in p.baseline:
-        raise HTTPException(400, "missing-candles-or-baseline")
-
-    closes = [c.close for c in p.candles]
-    last_px = closes[-1]
-    range_px = (max(closes) - min(closes)) if len(closes) > 2 else 0.0
-
-    usr = {
-      "symbol": p.symbol, "tf": p.tf, "last": last_px, "range": range_px,
-      "baseline": p.baseline.get("plan", {}),
-      "context": { "allocPct": p.context.get("allocPct"), "riskPct": p.context.get("riskPct"), "split": p.context.get("split") }
+    # 2) Baseline
+    base = compute_baseline(candles)
+    base_dict: Dict[str, float] = {
+        "lastClose": base.lastClose,
+        "ema50": base.ema50,
+        "ema200": base.ema200,
+        "atr14": base.atr14,
+        "slopePct": base.slopePct,
+        "trend": base.trend,
     }
 
-    r = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.2,
-        response_format={"type": "json_object"},
-        messages=[ {"role":"system","content":SYSTEM_PROMPT},
-                   {"role":"user","content":json.dumps(usr)} ],
-    )
-
-    raw = r.choices[0].message.content or "{}"
+    # 3) Try LLM
+    use_split = payload.context.split or [25, 50, 25]
     try:
-        parsed = json.loads(raw)
+        sug: Suggestion = try_llm_suggestion(base_dict, use_split)
+        source = "gpt-4o-mini"
     except Exception:
-        parsed = {}
+        # 4) Rules fallback
+        lvls = build_rules_fallback(base)
+        rr1, rr2, rr3 = rr_from(lvls, use_split)
+        sug = Suggestion(
+            E1=lvls["E1"], E2=lvls["E2"], E3=lvls["E3"],
+            stop=lvls["stop"],
+            TP1=lvls["TP1"], TP2=lvls["TP2"], TP3=lvls["TP3"],
+            RR1=rr1, RR2=rr2, RR3=rr3,
+            confidence=55 if base.trend != "flat" else 50,
+            rationale="Plano gerado por regras objetivas com base em ATR/EMA e tendência."
+        )
+        source = "rules-fallback"
 
-    base = p.baseline.get("plan", {})
-    s = (parsed.get("suggestion") or {})
-
-    def g(k):
-        return guard_flo(s.get(k, base.get(k, last_px)), base.get(k, last_px))
-
-    suggestion = {
-        "E1": g("E1"), "E2": g("E2"), "E3": g("E3"),
-        "stop": g("stop"), "TP1": g("TP1"), "TP2": g("TP2"), "TP3": g("TP3"),
-        "confidence": int(max(0, min(100, int(s.get("confidence", 75))))),
-        "rationale": str(s.get("rationale", "Ajustes mínimos em torno do baseline."))
-    }
-
-    LAST_HIT[key] = now
-    return {"ok": True, "source": "gpt-4o-mini", "suggestion": suggestion}
+    return AnalyzeOut(
+        ok=True,
+        source=source, 
+        baseline=base,
+        suggestion=sug
+    )
