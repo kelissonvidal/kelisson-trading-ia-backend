@@ -1,7 +1,7 @@
 import json
 import os
 from typing import Dict, Any, List
-from .schemas import Suggestion
+from schemas import Suggestion
 
 # Prefer new SDK if available; fallback to chat.completions
 _OPENAI_MODE = None
@@ -99,3 +99,4 @@ def try_llm_suggestion(baseline: Dict[str, float], split: List[float]) -> Sugges
         return _coerce_suggestion(data)
     except Exception as e:
         raise RuntimeError(f"LLM error: {e}")
+
