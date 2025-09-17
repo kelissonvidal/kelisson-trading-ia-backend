@@ -2,7 +2,7 @@ import math
 import os
 from typing import List, Tuple, Dict
 import httpx
-from .schemas import Candle, BaselineOut, Suggestion
+from schemas import Candle, BaselineOut, Suggestion
 
 BINANCE_BASE = os.getenv("BINANCE_BASE", "https://api.binance.com")
 
@@ -124,3 +124,4 @@ async def fetch_binance_klines(symbol: str, interval: str, limit: int = 400) -> 
     return out
 
 TF_TO_BINANCE = {"1h": "1h", "4h": "4h", "D": "1d", "1d": "1d"}
+
