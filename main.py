@@ -2,12 +2,9 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict
-from .schemas import AnalyzeIn, AnalyzeOut, Suggestion
-from .services import (
-    fetch_binance_klines, TF_TO_BINANCE,
-    compute_baseline, build_rules_fallback, rr_from
-)
-from .llm import try_llm_suggestion
+from schemas import AnalyzeIn, AnalyzeOut, Suggestion
+from services import fetch_binance_klines, TF_TO_BINANCE, compute_baseline, build_rules_fallback, rr_from
+from llm import try_llm_suggestion
 
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS","").split(",") if o.strip()]
 if not ALLOWED_ORIGINS:
@@ -74,3 +71,4 @@ async def analyze(payload: AnalyzeIn):
         baseline=base,
         suggestion=sug
     )
+
