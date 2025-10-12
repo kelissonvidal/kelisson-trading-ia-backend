@@ -1,44 +1,21 @@
-from typing import List, Optional, Literal
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+
+# =====================================================
+# CANDLE
+# =====================================================
 
 class Candle(BaseModel):
-    time: int = Field(..., description="Unix seconds")
+    time: int
     open: float
     high: float
     low: float
     close: float
     volume: float
 
-class BaselinePlan(BaseModel):
-    E1: float = 0
-    E2: float = 0
-    E3: float = 0
-    stop: float = 0
-    TP1: float = 0
-    TP2: float = 0
-    TP3: float = 0
-    last: Optional[float] = 0
-    atr: Optional[float] = 0
-
-class BaselineIn(BaseModel):
-    plan: Optional[BaselinePlan] = None
-
-class ContextIn(BaseModel):
-    allocPct: float = 1
-    riskPct: float = 1
-    split: List[float] = [25, 50, 25]
-
-    @validator("split")
-    def _sum_split(cls, v):
-        return v if sum(v) > 0 else [25, 50, 25]
-
-class AnalyzeIn(BaseModel):
-    symbol: str = "ETHUSDT"
-    tf: str = "4h"
-    candles: Optional[List[Candle]] = None
-    baseline: Optional[BaselineIn] = None
-    context: ContextIn = ContextIn()
-    account_id: str = "kelisson"
+# =====================================================
+# BASELINE OUTPUT
+# =====================================================
 
 class BaselineOut(BaseModel):
     lastClose: float
@@ -46,7 +23,11 @@ class BaselineOut(BaseModel):
     ema200: float
     atr14: float
     slopePct: float
-    trend: Literal["up", "down", "flat"]
+    trend: str  # "up", "down", "flat"
+
+# =====================================================
+# SUGGESTION (Resposta da IA)
+# =====================================================
 
 class Suggestion(BaseModel):
     E1: float
@@ -59,11 +40,35 @@ class Suggestion(BaseModel):
     RR1: float
     RR2: float
     RR3: float
-    confidence: int
+    confidence: int  # 0-100
     rationale: str
+    trend: Optional[str] = "flat"  # "up", "down", "flat"
+
+# =====================================================
+# ANALYZE INPUT (Request do Frontend)
+# =====================================================
+
+class ContextIn(BaseModel):
+    allocPct: float
+    riskPct: float
+    split: Optional[List[float]] = None
+
+class AnalyzeIn(BaseModel):
+    symbol: str
+    tf: str
+    candles: Optional[List[Candle]] = None
+    context: ContextIn
+    account_id: str
+    
+    # ✨ NOVO: Technical Context do Frontend
+    technicalContext: Optional[Dict[str, Any]] = None
+
+# =====================================================
+# ANALYZE OUTPUT (Response para Frontend)
+# =====================================================
 
 class AnalyzeOut(BaseModel):
-    ok: bool = True
-    source: Literal["gpt-4o-mini", "rules-fallback"]
+    ok: bool
+    source: str  # "gpt-4o-mini", "claude-sonnet-4", "rules-fallback"
     baseline: BaselineOut
     suggestion: Suggestion
